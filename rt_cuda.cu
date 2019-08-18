@@ -6,18 +6,19 @@
 #include <math.h>
 #include <float.h>
 #include <cuda.h>
+#include "vec3.cu"
 
 #define WIDTH 1280
 #define HEIGHT 720
 #define BLOCKX 16
 #define BLOCKY 16
-#define BG_COLOR {0, 0, 255, 255}
+#define BG_COLOR {150, 150, 255, 255}
 #define MS .1
 #define TR .05
-#define RT_DEPTH 3
+#define RT_DEPTH 5
 
 // Typedefs
-typedef uchar4 Color;
+typedef uchar4 Color; // .x->R, .y->G, .z->B, .w->A
 typedef enum Light_Type {
     AMBIENT,
     DIRECTIONAL,
@@ -74,72 +75,82 @@ __device__ Color s_mult_vec(double scalar, Color vec);
 __device__ double length(double3 vec);
 
 // Global variables
-__managed__ double3 origin = {0.0, 0.0, 0.0};
-__managed__ double theta = 0.0;
-__managed__ Scene scene;
+__managed__ double3 origin = {0.0, 0.0, 0.0}; // Current camera position
+__managed__ double theta = 0.0; // Rotation of camera about Y axis
+__managed__ Scene scene; // struct containing objects to be rendered
 
 
 int main(int argc, char const *argv[])
 {
-
-    Color *fb;
-    int fb_size;
-    int pitch = WIDTH*sizeof(Color);
+    // Set stack size for cuda threads in bytes (size_t)
+    // Default is 1024 - If too low, part of scene will render black
+    // Needed at high recursion depths
+    cudaDeviceSetLimit(cudaLimitStackSize, 4096);
+    Color *fb; // Array of RGBA pixels
+    size_t fb_size; // WIDTH*HEIGHT*sizeof(Color)
+    int pitch = WIDTH*sizeof(Color); // How many bytes to jump to move down a row
 
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *texture;
-    //SDL_Surface *surface;
     SDL_Event event;
 
     SDL_Init(SDL_INIT_VIDEO);
 
-    window = SDL_CreateWindow("RayTrace",
+    window = SDL_CreateWindow(
+        "RayTracer",
         SDL_WINDOWPOS_UNDEFINED,
         SDL_WINDOWPOS_UNDEFINED,
-        WIDTH,                               // width, in pixels
-        HEIGHT,                               // height, in pixels
-        SDL_WINDOW_OPENGL |
-        SDL_WINDOW_FULLSCREEN |
-        //SDL_WINDOW_SHOWN |
+        WIDTH,                             // width, in pixels
+        HEIGHT,                            // height, in pixels
+        SDL_WINDOW_OPENGL |                // Flags
+        //SDL_WINDOW_FULLSCREEN |
+        SDL_WINDOW_SHOWN |
         0
     );
 
     renderer = SDL_CreateRenderer(
         window,
         -1,
-        SDL_RENDERER_SOFTWARE
+        SDL_RENDERER_ACCELERATED // Change to SDL_RENDERER_SOFTWARE if using VNC
     );
 
-    cudaMallocManaged(&scene.spheres, sizeof(Sphere*)*3);
-    AddSphere(1, make_double3(-2.0, 0.0, 4.0), make_uchar4(255, 0, 0, 0), 10, .2);
-    AddSphere(1, make_double3(0.0, -1.0, 3.0), make_uchar4(0, 255, 0, 0), 500, .3);
-    AddSphere(1, make_double3(2.0, 0.0, 4.0), make_uchar4(0, 0, 255, 0), 500, .4);
-    AddSphere(5000, make_double3(0,-5001, 0), make_uchar4(255, 0, 255, 255), 1000, .5);
-    AddSphere(1, make_double3(0.0, 0.0, -3.0), make_uchar4(0, 0, 0, 0), 0.0, .9);
-    AddSphere(2, make_double3(0.0, 1.0, 6.0), make_uchar4(255, 255, 255, 255), 0.0, .9);
+    texture = SDL_CreateTexture(
+        renderer,
+        SDL_PIXELFORMAT_ABGR8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        WIDTH,
+        HEIGHT
+    );
 
+    // Adding Spheres to scene
+    cudaMallocManaged(&scene.spheres, sizeof(Sphere*)*3);
+    AddSphere(1, make_double3(-2.0, 0.0, 4.0), make_uchar4(255, 0, 0, 0), 1, .5);
+    AddSphere(1, make_double3(0.0, -1.0, 3.0), make_uchar4(0, 255, 0, 0), 500, .5);
+    AddSphere(1, make_double3(2.0, 0.0, 4.0), make_uchar4(0, 0, 255, 0), 500, .5);
+    AddSphere(5000, make_double3(0,-5001, 0), make_uchar4(40, 200, 90, 255), 10, .05);
+    AddSphere(1, make_double3(0.0, 0.0, -3.0), make_uchar4(0, 0, 0, 0), 0.0, .4);
+    AddSphere(2, make_double3(0.0, 1.0, 6.0), make_uchar4(0, 200, 200, 255), 20, 0.5);
+
+    // Adding lights to scene
     cudaMallocManaged(&scene.lights, sizeof(Light*)*3);
-    AddLight(AMBIENT, 0.2);
+    AddLight(AMBIENT, .3);
     AddLight(POINT, 0.6, make_double3(2, 1, 0));
     AddLight(DIRECTIONAL, 0.2, make_double3(1, 4, 4));
     cudaDeviceSynchronize();
 
-    fb_size = WIDTH*HEIGHT*sizeof(Color);
-    cudaMallocManaged(&fb, fb_size);
-
-    dim3 blocks(WIDTH/BLOCKX+1,HEIGHT/BLOCKY+1);
-    dim3 threads(BLOCKX,BLOCKY);
-
-    texture = SDL_CreateTexture(renderer,
-                                SDL_PIXELFORMAT_ABGR8888,
-                                SDL_TEXTUREACCESS_STREAMING,
-                                WIDTH,
-                                HEIGHT);
-
 
     int device = -1;
     cudaGetDevice(&device);
+    dim3 blocks(WIDTH/BLOCKX+1,HEIGHT/BLOCKY+1);
+    dim3 threads(BLOCKX,BLOCKY);
+
+    fb_size = WIDTH*HEIGHT*sizeof(Color);
+    cudaMallocManaged(&fb, fb_size);
+
+
+    /* Benchmarks */
+
     // for(int i = 0; i < 1000; i++) {
     //     cudaMemPrefetchAsync(fb, fb_size, device, NULL);
     //     renderSingleFrame<<<blocks,threads>>>(fb, WIDTH, HEIGHT);
@@ -149,7 +160,6 @@ int main(int argc, char const *argv[])
     //     SDL_RenderPresent(renderer);
     // }
 
-
     // for(int i = 0; i < 100; i++) {
     //     renderSingleFrame<<<blocks,threads>>>(fb, WIDTH, HEIGHT);
     //     cudaDeviceSynchronize();
@@ -157,13 +167,15 @@ int main(int argc, char const *argv[])
     //     SDL_RenderPresent(renderer);
     // }
 
-
+    // Render first frame
     renderSingleFrame<<<blocks,threads>>>(fb, WIDTH, HEIGHT);
     cudaDeviceSynchronize();
     SDL_UpdateTexture(texture, NULL, (void *)fb, pitch);
     SDL_RenderCopy(renderer, texture, NULL, NULL);
     SDL_RenderPresent(renderer);
 
+    // Refresh every movement keypress
+    // wasd,  q-e to rotate, z-x to move up/down
     while (1) {
         SDL_PollEvent(&event);
 
@@ -173,7 +185,6 @@ int main(int argc, char const *argv[])
 
         switch(event.type) {
             case SDL_KEYDOWN:
-                //printf("keydown\n");
                 switch(event.key.keysym.sym) {
                     case SDLK_d:
                         origin.x +=MS*cos(theta);
@@ -184,10 +195,10 @@ int main(int argc, char const *argv[])
                         origin.z +=MS*sin(theta);
                         break;
                     case SDLK_z:
-                        origin.y -=MS;
+                        origin.y +=MS;
                         break;
                     case SDLK_x:
-                        origin.y +=MS;
+                        origin.y -=MS;
                         break;
                     case SDLK_s:
                         origin.z -=MS*cos(theta);
@@ -213,7 +224,6 @@ int main(int argc, char const *argv[])
                 cudaMemPrefetchAsync(fb, fb_size, device, NULL);
                 break;
             case SDL_KEYUP:
-                //printf("keyup\n");
                 break;
             default:
                 break;
@@ -222,6 +232,7 @@ int main(int argc, char const *argv[])
 
     cudaFree(fb);
 
+    SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
 
@@ -230,15 +241,16 @@ int main(int argc, char const *argv[])
     return 0;
 }
 
+// Old method of screendrawing - slower than using texture
 void output_fb_to_sdl(SDL_Renderer *renderer, Color *framebuffer, int width, int height)
 {
     for(int i = 0; i < width; i++){
         for(int j = 0; j < height; j++) {
-           SDL_SetRenderDrawColor(renderer, 0, 0, 255, 0);
-                                  // framebuffer[i + j*width].x,
-                                  // framebuffer[i + j*width].y,
-                                  // framebuffer[i + j*width].z,
-                                  // framebuffer[i + j*width].w);
+           SDL_SetRenderDrawColor(renderer,
+                                  framebuffer[i + j*width].x,
+                                  framebuffer[i + j*width].y,
+                                  framebuffer[i + j*width].z,
+                                  framebuffer[i + j*width].w);
            SDL_RenderDrawPoint(renderer, i, j);
         }
     }
@@ -304,7 +316,7 @@ __device__ double3 CanvasToViewport(int x, int y, int width, int height)
     double3 temp;
     temp.x =  ((double)x-(width/2))/(double)height;
     temp.y = -((double)y-(height/2))/(double)height;
-    temp.z = 1;
+    temp.z = 1.0;
 
     retval.x = temp.x*cos(theta) + temp.z*sin(theta);
     retval.y = temp.y;
