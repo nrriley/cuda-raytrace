@@ -15,7 +15,7 @@
 #define BG_COLOR {150, 150, 255, 255}
 #define MS .1
 #define TR .05
-#define RT_DEPTH 5
+#define RT_DEPTH 3
 
 // Typedefs
 typedef uchar4 Color; // .x->R, .y->G, .z->B, .w->A
@@ -66,12 +66,6 @@ __device__ double ClosestIntersection(double3 O, double3 viewport, double t_min,
 __device__ double3 ReflectRay(double3 R, double3 normal);
 // linear algebra
 __device__ double dot(double3 vec1, double3 vec2);
-__device__ double3 sub_vec(double3 vec1, double3 vec2);
-__device__ double3 add_vec(double3 vec1, double3 vec2);
-__device__ Color add_Color(Color vec1, Color vec2);
-__device__ double3 mult_vec(double3 vec1, double3 vec2);
-__device__ double3 s_mult_vec(double scalar, double3 vec);
-__device__ Color s_mult_vec(double scalar, Color vec);
 __device__ double length(double3 vec);
 
 // Global variables
@@ -174,7 +168,7 @@ int main(int argc, char const *argv[])
     SDL_RenderCopy(renderer, texture, NULL, NULL);
     SDL_RenderPresent(renderer);
 
-    // Refresh every movement keypress
+    // Render after every movement keypress
     // wasd,  q-e to rotate, z-x to move up/down
     while (1) {
         SDL_PollEvent(&event);
@@ -226,6 +220,7 @@ int main(int argc, char const *argv[])
             case SDL_KEYUP:
                 break;
             default:
+                SDL_RenderPresent(renderer);
                 break;
         }
     }
@@ -242,19 +237,19 @@ int main(int argc, char const *argv[])
 }
 
 // Old method of screendrawing - slower than using texture
-void output_fb_to_sdl(SDL_Renderer *renderer, Color *framebuffer, int width, int height)
-{
-    for(int i = 0; i < width; i++){
-        for(int j = 0; j < height; j++) {
-           SDL_SetRenderDrawColor(renderer,
-                                  framebuffer[i + j*width].x,
-                                  framebuffer[i + j*width].y,
-                                  framebuffer[i + j*width].z,
-                                  framebuffer[i + j*width].w);
-           SDL_RenderDrawPoint(renderer, i, j);
-        }
-    }
-}
+// void output_fb_to_sdl(SDL_Renderer *renderer, Color *framebuffer, int width, int height)
+// {
+//     for(int i = 0; i < width; i++){
+//         for(int j = 0; j < height; j++) {
+//            SDL_SetRenderDrawColor(renderer,
+//                                   framebuffer[i + j*width].x,
+//                                   framebuffer[i + j*width].y,
+//                                   framebuffer[i + j*width].z,
+//                                   framebuffer[i + j*width].w);
+//            SDL_RenderDrawPoint(renderer, i, j);
+//         }
+//     }
+// }
 
 void AddSphere(int radius, double3 center, Color color, double specular, double reflect)
 {
@@ -339,23 +334,24 @@ __device__  Color TraceRay(double3 O, double3 viewport, double t_min, double t_m
         return bg_color;
     }
     //printf("%lf, %lf\n", t1, t2);
-    double3 point = add_vec(O, s_mult_vec(closest_t,viewport));
-    double3 normal = sub_vec(point, closest_sphere->center);
-    normal = s_mult_vec(1/length(normal), normal);
-    local_color =  s_mult_vec(ComputeLighting(point,
-                                      normal,
-                                      s_mult_vec(-1, viewport),
-                                      closest_sphere->specular),
-                      closest_sphere->color);
+    double3 point = O + closest_t * viewport;
+    double3 normal = point - closest_sphere->center;
+    normal = (1/length(normal)) * normal;
+    local_color =  ComputeLighting(point,
+                                   normal,
+                                   -1 * viewport,
+                                   closest_sphere->specular
+                                  )
+                   * closest_sphere->color;
     if(depth <= 0 || closest_sphere->reflectivity <= 0) {
         return local_color;
     }
 
-    double3 R = ReflectRay(s_mult_vec(-1, viewport), normal);
+    double3 R = ReflectRay(-1*viewport, normal);
     reflected_color = TraceRay(point, R, 0.001, DBL_MAX, bg_color, depth-1);
 
-    return add_Color(s_mult_vec(1 - closest_sphere->reflectivity, local_color),
-           s_mult_vec(closest_sphere->reflectivity, reflected_color));
+    return ((1 - closest_sphere->reflectivity) * local_color)
+            + (closest_sphere->reflectivity * reflected_color);
 }
 
 __device__ double ClosestIntersection(double3 O, double3 viewport, double t_min, double t_max, int *sphere_index)
@@ -376,22 +372,19 @@ __device__ double ClosestIntersection(double3 O, double3 viewport, double t_min,
         }
     }
 
-
     return closest_t;
 }
 
 
 __device__ double3 ReflectRay(double3 R, double3 normal)
 {
-     return sub_vec(s_mult_vec(2*dot(normal, R),
-                        normal),
-                     R);
+     return ((2*dot(normal, R)) * normal) - R;
 }
 __device__ double2 IntersectRaySphere(double3 O, double3 viewport, Sphere *sphere)
 {
     double3 coeffs;
     double discriminant;
-    double3 offset = sub_vec(O, sphere->center);
+    double3 offset = O - sphere->center;
 
     coeffs.x = dot(viewport, viewport);
     coeffs.y = 2*(dot(offset, viewport));
@@ -415,7 +408,7 @@ __device__ double ComputeLighting(double3 point, double3 normal, double3 view, d
             intensity += scene.lights[i]->intensity;
         } else {
             if(scene.lights[i]->type == POINT){
-                light_vec = sub_vec(scene.lights[i]->pos, point);
+                light_vec = scene.lights[i]->pos - point;
             } else {
                 light_vec = scene.lights[i]->dir;
             }
@@ -433,7 +426,7 @@ __device__ double ComputeLighting(double3 point, double3 normal, double3 view, d
             }
             // Specular
             if(spec != -1) {
-                double3 reflect = sub_vec(s_mult_vec(2*n_dot_l, normal), light_vec);
+                double3 reflect = ((2*n_dot_l) * normal) - light_vec;
                 double r_dot_v = dot(reflect, view);
                 if(r_dot_v > 0.0) {
                     intensity += scene.lights[i]->intensity*pow(r_dot_v/(length(reflect)*length(view)), spec);
@@ -449,61 +442,7 @@ __device__ double dot(double3 vec1, double3 vec2)
     return vec1.x*vec2.x + vec1.y*vec2.y + vec1.z*vec2.z;
 }
 
-__device__ double3 sub_vec(double3 vec1, double3 vec2)
-{
-    double3 retval;
-    retval.x = vec1.x-vec2.x;
-    retval.y = vec1.y-vec2.y;
-    retval.z = vec1.z-vec2.z;
-    return retval;
-}
-
-__device__ double3 add_vec(double3 vec1, double3 vec2)
-{
-    double3 retval;
-    retval.x = vec1.x+vec2.x;
-    retval.y = vec1.y+vec2.y;
-    retval.z = vec1.z+vec2.z;
-    return retval;
-}
-
-__device__ double3 mult_vec(double3 vec1, double3 vec2)
-{
-    double3 retval;
-    retval.x = vec1.x*vec2.x;
-    retval.y = vec1.y*vec2.y;
-    retval.z = vec1.z*vec2.z;
-    return retval;
-}
-
-__device__ double3 s_mult_vec(double scalar, double3 vec)
-{
-    double3 retval;
-    retval.x = scalar*vec.x;
-    retval.y = scalar*vec.y;
-    retval.z = scalar*vec.z;
-    return retval;
-}
-
-__device__ Color s_mult_vec(double scalar, Color vec)
-{
-    Color retval = vec;
-    retval.x = scalar*vec.x;
-    retval.y = scalar*vec.y;
-    retval.z = scalar*vec.z;
-    return retval;
-}
-
 __device__ double length(double3 vec)
 {
     return sqrt(dot(vec, vec));
-}
-
-__device__ Color add_Color(Color vec1, Color vec2)
-{
-    Color retval = vec1;
-    retval.x = vec1.x+vec2.x;
-    retval.y = vec1.y+vec2.y;
-    retval.z = vec1.z+vec2.z;
-    return retval;
 }
