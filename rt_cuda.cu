@@ -16,7 +16,7 @@
 #define BG_COLOR {150, 150, 255, 255}
 #define MS .1
 #define TR .05
-#define RT_DEPTH 3
+#define RT_DEPTH 1
 #define RAYS_PER_PIXEL 100
 
 // Typedefs
@@ -131,7 +131,7 @@ void scene_setup()
     material = AddMaterial(make_uchar4(0, 0, 255, 0), make_uchar4(0,0,0,0), .5, 500, 2);
     AddSphere(1, make_double3(2.0, 0.0, 4.0), material);
 
-    // AddTrianglesFromSTL("cube.stl", material);
+    AddTrianglesFromSTL("cube.stl", material);
 
 
     AddLight(AMBIENT, .3);
@@ -283,7 +283,7 @@ int main(int argc, char const *argv[])
                 case SDL_KEYUP:
                 break;
                 default:
-                SDL_RenderPresent(renderer);
+               // SDL_RenderPresent(renderer);
                 break;
             }
         }
@@ -338,14 +338,14 @@ void AddTrianglesFromSTL(const char *location, Material *material)
     FILE *f = fopen(location, "r");
     fscanf(f, "solid %s\n", name);
     fscanf(f, "%s ", sentinel);
-    printf("%s\n", sentinel);
+    //printf("%s\n", sentinel);
     while(!strcmp(sentinel, "facet")) {
         fscanf(f, "normal %lf %lf %lf\n", &normal.x, &normal.y, &normal.z);
         fscanf(f, "outer loop\n");
         fscanf(f, "vertex %lf %lf %lf\n", &v1.x, &v1.y, &v1.z);
         fscanf(f, "vertex %lf %lf %lf\n", &v2.x, &v2.y, &v2.z);
         fscanf(f, "vertex %lf %lf %lf\n", &v3.x, &v3.y, &v3.z);
-        printf("vertex %lf %lf %lf\n", v2.x, v2.y, v2.z);
+        //printf("vertex %lf %lf %lf\n", v2.x, v2.y, v2.z);
         fscanf(f, "endloop\n");
         fscanf(f, "endfacet\n");
         AddTriangle(normal, v1, v2, v3, material);
@@ -681,7 +681,7 @@ __device__ double ComputeLighting(double3 point, double3 normal, double3 view, d
 __host__ __device__ double3 cross(double3 vec1, double3 vec2)
 {
     return make_double3(vec1.y*vec2.z-vec1.z*vec2.y,
-                        vec1.z*vec2.x-vec1.z*vec2.z,
+                        vec1.z*vec2.x-vec1.x*vec2.z,
                         vec1.x*vec2.y-vec1.y*vec2.x
                        );
 }
