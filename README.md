@@ -27,6 +27,9 @@ Two types of pathtracing are currently implemented:
 The first type is a method where reflected rays are created by first calculating the perfect reflected ray, and then modifying it by adding a small vector who's component magnitudes fall within a range determined my the roughness value of the surface material.  
 The second type simply randomly chooses a ray in the same hemisphere as the normal of the surface at the reflection point. This method is only able to model diffuse reflection, and larger values of ```#RAYS_PER_PIXEL``` are needed.  
 
+![output](/render2.png)  
+*Mode One Pathtracing*  
+
 The first method is enabled by default. To use the second method instead, build with:       ```nvcc rt_cuda.cu -lSDL2 -lm -DPT_NAIVE```
 
 In the future I will implement pathtracing with GGX Importance Sampling.
@@ -36,3 +39,5 @@ A non-interactive benchmarking mode is included. Build with ```nvcc rt_cuda.cu -
 
 ## Scene Definition
 The scene is initialized in the scene_setup() function. A sample scene is provided. Currently, spheres and triangles are supported. Ambient, Point, and Directional lights are supported. See the provided sample scene for examples on how to add each type of object to the scene.
+
+ASCII STL files can be loaded using the AddTrianglesFromSTL() function, which supports an optional position offset and scaling factor.
