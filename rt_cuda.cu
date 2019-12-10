@@ -9,14 +9,14 @@
 #include <curand_kernel.h>
 #include "vec3.cu"
 
-#define WIDTH 1280
-#define HEIGHT 720
+#define WIDTH 1920
+#define HEIGHT 1080
 #define BLOCKX 16
 #define BLOCKY 16
 #define BG_COLOR {150, 150, 255, 255}
 #define MS .1
 #define TR .05
-#define RT_DEPTH 1
+#define RT_DEPTH 5
 #define RAYS_PER_PIXEL 100
 
 // Typedefs
@@ -89,6 +89,7 @@ void AddSphere(int radius, double3 center, Material *material);
 void AddTriangle(double3 normal, double3 v1, double3 v2, double3 v3, Material *material);
 void AddTriangle(double3 v1, double3 v2, double3 v3, Material *material);
 void AddTrianglesFromSTL(const char *location, Material *material);
+void AddTrianglesFromSTL(const char *location, double3 offset, double scale, Material *material);
 Material *AddMaterial(Color color, Color emmitance, double reflectance, double specular, double roughness);
 void AddLight(Light_Type type, double intensity);
 void AddLight(Light_Type type, double intensity, double3 pos_dir);
@@ -122,16 +123,17 @@ __managed__ int pathtrace = 0;
 void scene_setup()
 {
     Material *material;
-    material = AddMaterial(make_uchar4(40, 200, 90, 255), make_uchar4(0,0,0,0), .05, 10, 0);
+    material = AddMaterial(make_uchar4(40, 200, 90, 255), make_uchar4(0,0,0,0), .05, 10, 100);
     AddSphere(5000, make_double3(0,-5001, 0), material);
-    material = AddMaterial(make_uchar4(255, 0, 0, 0), make_uchar4(0,0,0,0), 1, 1, 100);
+    material = AddMaterial(make_uchar4(255, 0, 0, 0), make_uchar4(0,0,0,0), .8, 1, 100);
     AddSphere(1, make_double3(-2.0, 0.0, 4.0), material);
-    material = AddMaterial(make_uchar4(0, 255, 0, 0), make_uchar4(0,0,0,0), .3, 20, 1);
+    material = AddMaterial(make_uchar4(0, 255, 0, 0), make_uchar4(0,0,0,0), .5, 20, 1);
     AddSphere(1, make_double3(0.0, -1.0, 3.0), material);
-    material = AddMaterial(make_uchar4(0, 0, 255, 0), make_uchar4(0,0,0,0), .5, 500, 2);
+    material = AddMaterial(make_uchar4(0, 0, 255, 0), make_uchar4(0,0,0,0), .3, 50, 50);
     AddSphere(1, make_double3(2.0, 0.0, 4.0), material);
 
-    AddTrianglesFromSTL("cube.stl", material);
+    material = AddMaterial(make_uchar4(200, 100, 100, 0), make_uchar4(0,0,0,0), .1, 1, 50);
+    AddTrianglesFromSTL("cube.stl", make_double3(0,1,8), 2, material);
 
 
     AddLight(AMBIENT, .3);
@@ -283,7 +285,7 @@ int main(int argc, char const *argv[])
                 case SDL_KEYUP:
                 break;
                 default:
-               // SDL_RenderPresent(renderer);
+                //SDL_RenderPresent(renderer);
                 break;
             }
         }
@@ -330,6 +332,7 @@ void AddTriangle(double3 v1, double3 v2, double3 v3, Material *material)
     scene.triangles[scene.triangle_n]->material = material;
     scene.triangle_n++;
 }
+
 void AddTrianglesFromSTL(const char *location, Material *material)
 {
     double3 v1, v2, v3, normal;
@@ -351,9 +354,31 @@ void AddTrianglesFromSTL(const char *location, Material *material)
         AddTriangle(normal, v1, v2, v3, material);
         fscanf(f, "%s ", sentinel);
     }
-
-
+    fclose(f);
 }
+
+void AddTrianglesFromSTL(const char *location, double3 offset, double scale, Material *material)
+{
+    double3 v1, v2, v3, normal;
+    char sentinel[10];
+    char name[100];
+    FILE *f = fopen(location, "r");
+    fscanf(f, "solid %s\n", name);
+    fscanf(f, "%s ", sentinel);
+    while(!strcmp(sentinel, "facet")) {
+        fscanf(f, "normal %lf %lf %lf\n", &normal.x, &normal.y, &normal.z);
+        fscanf(f, "outer loop\n");
+        fscanf(f, "vertex %lf %lf %lf\n", &v1.x, &v1.y, &v1.z);
+        fscanf(f, "vertex %lf %lf %lf\n", &v2.x, &v2.y, &v2.z);
+        fscanf(f, "vertex %lf %lf %lf\n", &v3.x, &v3.y, &v3.z);
+        fscanf(f, "endloop\n");
+        fscanf(f, "endfacet\n");
+        AddTriangle(normal, (scale*v1)+offset, (scale*v2)+offset, (scale*v3)+offset, material);
+        fscanf(f, "%s ", sentinel);
+    }
+    fclose(f);
+}
+
 Material *AddMaterial(Color color, Color emmitance, double reflectance, double specular, double roughness)
 {
     cudaMallocManaged(&scene.materials[scene.material_n], sizeof(Material));
