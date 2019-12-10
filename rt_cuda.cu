@@ -6,6 +6,7 @@
 #include <math.h>
 #include <float.h>
 #include <cuda.h>
+#include <curand_kernel.h>
 #include "vec3.cu"
 
 #define WIDTH 1280
@@ -15,7 +16,7 @@
 #define BG_COLOR {150, 150, 255, 255}
 #define MS .1
 #define TR .05
-#define RT_DEPTH 3
+#define RT_DEPTH 5
 
 // Typedefs
 typedef uchar4 Color; // .x->R, .y->G, .z->B, .w->A
@@ -25,13 +26,42 @@ typedef enum Light_Type {
     POINT
 } Light_Type;
 
+typedef struct Material {
+    Color color;
+    Color emmitance;
+    double roughness;
+    double reflectance;
+    double specular;
+} Material;
+
 typedef struct Sphere {
     double3 center;
     double radius;
-    double specular;
-    double reflectivity;
-    Color color;
+    Material* material;
 } Sphere;
+
+
+
+typedef struct Triangle {
+    double3 normal;
+    double3 v1;
+    double3 v2;
+    double3 v3;
+    Material *material;
+} Triangle;
+
+typedef struct Ray {
+    double3 origin;
+    double3 direction;
+} Ray;
+
+
+typedef struct Interaction {
+    double3 point;
+    double closest_t;
+    double3 normal;
+    Material *material;
+} Interaction;
 
 typedef struct Light {
     double intensity;
@@ -44,25 +74,33 @@ typedef struct Light {
 
 typedef struct Scene {
     Sphere **spheres;
+    Triangle **triangles;
     int sphere_n;
+    int triangle_n;
     Light **lights;
     int light_n;
+    Material **materials;
+    int material_n;
 } Scene;
 
 // Host Functions
 void output_fb_to_sdl(SDL_Renderer *renderer, Color *framebuffer, int width, int height);
-void AddSphere(int radius, double3 center, Color color, double specular, double reflect);
+//void AddSphere(int radius, double3 center, Color color, double specular, double reflect);
+void AddSphere(int radius, double3 center, Material *material);
+Material *AddMaterial(Color color, Color emmitance, double reflectance, double specular, double roughness);
 void AddLight(Light_Type type, double intensity);
 void AddLight(Light_Type type, double intensity, double3 pos_dir);
 // Global Functions
-__global__ void renderSingleFrame(Color *framebuffer, int width, int height);
+__global__ void setup_curand(curandState *state);
+__global__ void renderSingleFrame(Color *framebuffer, int width, int height, curandState *curand_state);
 
 // Device Functions
 __device__ double3 CanvasToViewport(int x, int y, int width, int height);
-__device__  Color TraceRay(double3 O, double3 viewport, double t_min, double t_max, Color bg_color, int depth);
-__device__ double2 IntersectRaySphere(double3 O, double3 viewport, Sphere *sphere);
+__device__  Color TraceRay(Ray ray, double t_min, double t_max, Color bg_color, int depth);
+__device__ double2 IntersectRay(Ray ray, Sphere *sphere);
+__device__ double IntersectRay(Ray ray, Triangle *triangle);
 __device__ double ComputeLighting(double3 point, double3 normal, double3 view, double spec);
-__device__ double ClosestIntersection(double3 O, double3 viewport, double t_min, double t_max, int *sphere_index);
+__device__ Interaction ClosestIntersection(Ray ray, double t_min, double t_max);
 __device__ double3 ReflectRay(double3 R, double3 normal);
 // linear algebra
 __device__ double dot(double3 vec1, double3 vec2);
@@ -117,14 +155,25 @@ int main(int argc, char const *argv[])
         HEIGHT
     );
 
-    // Adding Spheres to scene
-    cudaMallocManaged(&scene.spheres, sizeof(Sphere*)*3);
-    AddSphere(1, make_double3(-2.0, 0.0, 4.0), make_uchar4(255, 0, 0, 0), 1, .5);
-    AddSphere(1, make_double3(0.0, -1.0, 3.0), make_uchar4(0, 255, 0, 0), 500, .5);
-    AddSphere(1, make_double3(2.0, 0.0, 4.0), make_uchar4(0, 0, 255, 0), 500, .5);
-    AddSphere(5000, make_double3(0,-5001, 0), make_uchar4(40, 200, 90, 255), 10, .05);
-    AddSphere(1, make_double3(0.0, 0.0, -3.0), make_uchar4(0, 0, 0, 0), 0.0, .4);
-    AddSphere(2, make_double3(0.0, 1.0, 6.0), make_uchar4(0, 200, 200, 255), 20, 0.5);
+    // // Adding Spheres to scene
+    cudaMallocManaged(&scene.materials, sizeof(Material*));
+    cudaMallocManaged(&scene.spheres, sizeof(Sphere*));
+    Material *material;
+    material = AddMaterial(make_uchar4(40, 200, 90, 255), make_uchar4(0,0,0,0), .05, 10, 0);
+    AddSphere(5000, make_double3(0,-5001, 0), material);
+    material = AddMaterial(make_uchar4(255, 0, 0, 0), make_uchar4(0,0,0,0), .5, 1, 0);
+    AddSphere(1, make_double3(-2.0, 0.0, 4.0), material);
+    material = AddMaterial(make_uchar4(0, 255, 0, 0), make_uchar4(0,0,0,0), .5, 500, 0);
+    AddSphere(1, make_double3(0.0, -1.0, 3.0), material);
+    material = AddMaterial(make_uchar4(0, 0, 255, 0), make_uchar4(0,0,0,0), .5, 500, 0);
+    AddSphere(1, make_double3(2.0, 0.0, 4.0), material);
+
+    // AddSphere(1, make_double3(-2.0, 0.0, 4.0), make_uchar4(255, 0, 0, 0), 1, .5);
+    // AddSphere(1, make_double3(0.0, -1.0, 3.0), make_uchar4(0, 255, 0, 0), 500, .5);
+    // AddSphere(1, make_double3(2.0, 0.0, 4.0), make_uchar4(0, 0, 255, 0), 500, .5);
+    // AddSphere(5000, make_double3(0,-5001, 0), make_uchar4(40, 200, 90, 255), 10, .05);
+    // AddSphere(1, make_double3(0.0, 0.0, -3.0), make_uchar4(0, 0, 0, 0), 0.0, .4);
+    // AddSphere(2, make_double3(0.0, 1.0, 6.0), make_uchar4(0, 200, 200, 255), 20, 0.5);
 
     // Adding lights to scene
     cudaMallocManaged(&scene.lights, sizeof(Light*)*3);
@@ -141,6 +190,11 @@ int main(int argc, char const *argv[])
 
     fb_size = WIDTH*HEIGHT*sizeof(Color);
     cudaMallocManaged(&fb, fb_size);
+
+    // Setup RNG
+    curandState *curand_state;
+    cudaMalloc(&curand_state, sizeof(curandState));
+    setup_curand<<<blocks,threads>>>(curand_state);
 
 
     /* Benchmarks */
@@ -162,7 +216,7 @@ int main(int argc, char const *argv[])
     // }
 
     // Render first frame
-    renderSingleFrame<<<blocks,threads>>>(fb, WIDTH, HEIGHT);
+    renderSingleFrame<<<blocks,threads>>>(fb, WIDTH, HEIGHT, curand_state);
     cudaDeviceSynchronize();
     SDL_UpdateTexture(texture, NULL, (void *)fb, pitch);
     SDL_RenderCopy(renderer, texture, NULL, NULL);
@@ -179,49 +233,49 @@ int main(int argc, char const *argv[])
 
         switch(event.type) {
             case SDL_KEYDOWN:
-                switch(event.key.keysym.sym) {
-                    case SDLK_d:
-                        origin.x +=MS*cos(theta);
-                        origin.z -=MS*sin(theta);
-                        break;
-                    case SDLK_a:
-                        origin.x -=MS*cos(theta);
-                        origin.z +=MS*sin(theta);
-                        break;
-                    case SDLK_z:
-                        origin.y +=MS;
-                        break;
-                    case SDLK_x:
-                        origin.y -=MS;
-                        break;
-                    case SDLK_s:
-                        origin.z -=MS*cos(theta);
-                        origin.x -=MS*sin(theta);
-                        break;
-                    case SDLK_w:
-                        origin.z +=MS*cos(theta);
-                        origin.x +=MS*sin(theta);
-                        break;
-                    case SDLK_q:
-                        theta -=TR;
-                        break;
-                    case SDLK_e:
-                        theta +=TR;
-                        break;
-                }
+            switch(event.key.keysym.sym) {
+                case SDLK_d:
+                origin.x +=MS*cos(theta);
+                origin.z -=MS*sin(theta);
+                break;
+                case SDLK_a:
+                origin.x -=MS*cos(theta);
+                origin.z +=MS*sin(theta);
+                break;
+                case SDLK_z:
+                origin.y +=MS;
+                break;
+                case SDLK_x:
+                origin.y -=MS;
+                break;
+                case SDLK_s:
+                origin.z -=MS*cos(theta);
+                origin.x -=MS*sin(theta);
+                break;
+                case SDLK_w:
+                origin.z +=MS*cos(theta);
+                origin.x +=MS*sin(theta);
+                break;
+                case SDLK_q:
+                theta -=TR;
+                break;
+                case SDLK_e:
+                theta +=TR;
+                break;
+            }
 
-                renderSingleFrame<<<blocks,threads>>>(fb, WIDTH, HEIGHT);
-                cudaDeviceSynchronize();
-                SDL_UpdateTexture(texture, NULL, (void *)fb, pitch);
-                SDL_RenderCopy(renderer, texture, NULL, NULL);
-                SDL_RenderPresent(renderer);
-                cudaMemPrefetchAsync(fb, fb_size, device, NULL);
-                break;
+            renderSingleFrame<<<blocks,threads>>>(fb, WIDTH, HEIGHT, curand_state);
+            cudaDeviceSynchronize();
+            SDL_UpdateTexture(texture, NULL, (void *)fb, pitch);
+            SDL_RenderCopy(renderer, texture, NULL, NULL);
+            SDL_RenderPresent(renderer);
+            cudaMemPrefetchAsync(fb, fb_size, device, NULL);
+            break;
             case SDL_KEYUP:
-                break;
+            break;
             default:
-                SDL_RenderPresent(renderer);
-                break;
+            SDL_RenderPresent(renderer);
+            break;
         }
     }
 
@@ -251,15 +305,25 @@ int main(int argc, char const *argv[])
 //     }
 // }
 
-void AddSphere(int radius, double3 center, Color color, double specular, double reflect)
+void AddSphere(int radius, double3 center, Material *material)
 {
     cudaMallocManaged(&scene.spheres[scene.sphere_n], sizeof(Sphere));
     scene.spheres[scene.sphere_n]->radius = radius;
     scene.spheres[scene.sphere_n]->center = center;
-    scene.spheres[scene.sphere_n]->color = color;
-    scene.spheres[scene.sphere_n]->specular = specular;
-    scene.spheres[scene.sphere_n]->reflectivity = reflect;
+    scene.spheres[scene.sphere_n]->material = material;
     scene.sphere_n++;
+}
+
+Material *AddMaterial(Color color, Color emmitance, double reflectance, double specular, double roughness)
+{
+    cudaMallocManaged(&scene.materials[scene.material_n], sizeof(Material));
+    scene.materials[scene.material_n]->color = color;
+    scene.materials[scene.material_n]->emmitance = emmitance;
+    scene.materials[scene.material_n]->reflectance = reflectance;
+    scene.materials[scene.material_n]->specular = specular;
+    scene.materials[scene.material_n]->roughness = roughness;
+    scene.material_n++;
+    return scene.materials[scene.material_n-1];
 }
 
 void AddLight(Light_Type type, double intensity)
@@ -289,17 +353,26 @@ void AddLight(Light_Type type, double intensity, double3 pos_dir)
     return;
 }
 
-__global__ void renderSingleFrame(Color *framebuffer, int width, int height)
+__global__ void setup_curand(curandState *state)
 {
-    double3 viewport;
+  int idx = threadIdx.x+blockDim.x*blockIdx.x;
+  curand_init(1234, idx, 0, &state[idx]);
+}
+
+__global__ void renderSingleFrame(Color *framebuffer, int width, int height, curandState *curand_state)
+{
+    Ray ray;
+    ray.origin = origin;
     Color color = BG_COLOR;
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
     if((i >= width) || (j >= height)) return;
 
-    viewport = CanvasToViewport(i, j, width, height);
-    color = TraceRay(origin, viewport, 1.0, DBL_MAX, BG_COLOR, RT_DEPTH);
 
+    ray.direction = CanvasToViewport(i, j, width, height);
+    color = TraceRay(ray, 1.0, DBL_MAX, BG_COLOR, RT_DEPTH);
+    curandState state = curand_state[i];
+    printf("%f\t", curand_uniform(&(state)));
 
     framebuffer[i + j*width] = color;
     return;
@@ -319,75 +392,89 @@ __device__ double3 CanvasToViewport(int x, int y, int width, int height)
     return retval;
 }
 
-__device__  Color TraceRay(double3 O, double3 viewport, double t_min, double t_max, Color bg_color, int depth)
+__device__  Color TraceRay(Ray ray, double t_min, double t_max, Color bg_color, int depth)
 {
     Color local_color, reflected_color;
-    double closest_t;
-    Sphere *closest_sphere = NULL;
-    int sphere_index = -1;
-    closest_t = ClosestIntersection(O, viewport, t_min, t_max, &sphere_index);
-    if(sphere_index >= 0) {
-        closest_sphere = scene.spheres[sphere_index];
-    }
+    Ray reflected_ray;
+    Interaction interaction;
 
-    if (closest_sphere == NULL){
+
+
+    interaction = ClosestIntersection(ray, t_min, t_max);
+
+    if (interaction.closest_t == DBL_MAX){
         return bg_color;
     }
-    //printf("%lf, %lf\n", t1, t2);
-    double3 point = O + closest_t * viewport;
-    double3 normal = point - closest_sphere->center;
+    double3 point = ray.origin + interaction.closest_t * ray.direction;
+    double3 normal = interaction.normal;
     normal = (1/length(normal)) * normal;
     local_color =  ComputeLighting(point,
                                    normal,
-                                   -1 * viewport,
-                                   closest_sphere->specular
+                                   -1 * ray.direction,
+                                   interaction.material->specular
                                   )
-                   * closest_sphere->color;
-    if(depth <= 0 || closest_sphere->reflectivity <= 0) {
+                                  * interaction.material->color;
+    if(depth <= 0 || interaction.material->reflectance <= 0) {
         return local_color;
     }
 
-    double3 R = ReflectRay(-1*viewport, normal);
-    reflected_color = TraceRay(point, R, 0.001, DBL_MAX, bg_color, depth-1);
+    reflected_ray.origin = point;
+    reflected_ray.direction = ReflectRay(-1*ray.direction, normal);
+    reflected_color = TraceRay(reflected_ray, .001, DBL_MAX, bg_color, depth-1);
 
-    return ((1 - closest_sphere->reflectivity) * local_color)
-            + (closest_sphere->reflectivity * reflected_color);
+    return ((1 - interaction.material->reflectance) * local_color)
+            + (interaction.material->reflectance * reflected_color);
 }
 
-__device__ double ClosestIntersection(double3 O, double3 viewport, double t_min, double t_max, int *sphere_index)
+__device__ Interaction ClosestIntersection(Ray ray, double t_min, double t_max)
 {
-    double closest_t = DBL_MAX;
-    *sphere_index = -1;
+    Interaction interaction;
     double2 t;
 
+    interaction.closest_t = DBL_MAX;
+
     for (int i = 0; i < scene.sphere_n; i++) {
-        t = IntersectRaySphere(O, viewport, scene.spheres[i]);
-        if (t.x < closest_t && t.x < t_max && t.x > t_min) {
-            closest_t = t.x;
-            *sphere_index = i;
+        t = IntersectRay(ray, scene.spheres[i]);
+        if (t.x < interaction.closest_t && t.x < t_max && t.x > t_min) {
+            interaction.closest_t = t.x;
+            interaction.point = ray.origin + interaction.closest_t * ray.direction;
+            interaction.normal = interaction.point - scene.spheres[i]->center;
+            interaction.material = scene.spheres[i]->material;
         }
-        if (t.y < closest_t && t.y < t_max && t.y > t_min) {
-            closest_t = t.y;
-            *sphere_index = i;
+        if (t.y < interaction.closest_t && t.y < t_max && t.y > t_min) {
+            interaction.closest_t = t.y;
+            interaction.point = ray.origin + interaction.closest_t * ray.direction;
+            interaction.normal = interaction.point - scene.spheres[i]->center;
+            interaction.material = scene.spheres[i]->material;
         }
     }
 
-    return closest_t;
+    for (int i = 0; i < scene.triangle_n; i++) {
+        t.x = IntersectRay(ray, scene.triangles[i]);
+        if (t.x < interaction.closest_t && t.x < t_max && t.x > t_min) {
+            interaction.closest_t = t.x;
+            interaction.point = ray.origin + interaction.closest_t * ray.direction;
+            interaction.normal = scene.triangles[i]->normal;
+            interaction.material = scene.triangles[i]->material;
+        }
+    }
+
+    return interaction;
 }
 
 
 __device__ double3 ReflectRay(double3 R, double3 normal)
 {
-     return ((2*dot(normal, R)) * normal) - R;
+    return ((2*dot(normal, R)) * normal) - R;
 }
-__device__ double2 IntersectRaySphere(double3 O, double3 viewport, Sphere *sphere)
+__device__ double2 IntersectRay(Ray ray, Sphere *sphere)
 {
     double3 coeffs;
     double discriminant;
-    double3 offset = O - sphere->center;
+    double3 offset = ray.origin - sphere->center;
 
-    coeffs.x = dot(viewport, viewport);
-    coeffs.y = 2*(dot(offset, viewport));
+    coeffs.x = dot(ray.direction, ray.direction);
+    coeffs.y = 2*(dot(offset, ray.direction));
     coeffs.z = dot(offset, offset) - (sphere->radius * sphere->radius);
     discriminant = (coeffs.y*coeffs.y) - (4*coeffs.x*coeffs.z);
 
@@ -396,37 +483,42 @@ __device__ double2 IntersectRaySphere(double3 O, double3 viewport, Sphere *spher
     }
 
     return make_double2((-coeffs.y + sqrt(discriminant)) / (2*coeffs.x),
-                        (-coeffs.y - sqrt(discriminant)) / (2*coeffs.x));
+    (-coeffs.y - sqrt(discriminant)) / (2*coeffs.x));
+}
+
+__device__ double IntersectRay(Ray ray, Triangle *triangle)
+{
+    //TODO
+    return 0.0;
 }
 
 __device__ double ComputeLighting(double3 point, double3 normal, double3 view, double spec)
 {
     double intensity = 0.0;
-    double3 light_vec;
+    Ray light_ray;
+    light_ray.origin = point;
     for(int i = 0; i < scene.light_n; i++) {
         if(scene.lights[i]->type == AMBIENT) {
             intensity += scene.lights[i]->intensity;
         } else {
             if(scene.lights[i]->type == POINT){
-                light_vec = scene.lights[i]->pos - point;
+                light_ray.direction = scene.lights[i]->pos - point;
             } else {
-                light_vec = scene.lights[i]->dir;
+                light_ray.direction = scene.lights[i]->dir;
             }
             //Shadows
-            int shadow_sphere_index;
-            ClosestIntersection(point, light_vec, 0.001, DBL_MAX, &shadow_sphere_index);
-            //printf("hi\n");
-            if(shadow_sphere_index != -1) {
+            if(ClosestIntersection(light_ray, 0.001, DBL_MAX).closest_t < DBL_MAX) {
+                // If object is occluding light then go to next light
                 continue;
             }
             // Diffuse
-            double n_dot_l = dot(normal, light_vec);
+            double n_dot_l = dot(normal, light_ray.direction);
             if(n_dot_l > 0.0) {
-                intensity += scene.lights[i]->intensity*n_dot_l/(length(normal)*length(light_vec));
+                intensity += scene.lights[i]->intensity*n_dot_l/(length(normal)*length(light_ray.direction));
             }
-            // Specular
+            //Specular
             if(spec != -1) {
-                double3 reflect = ((2*n_dot_l) * normal) - light_vec;
+                double3 reflect = ((2*n_dot_l) * normal) - light_ray.direction;
                 double r_dot_v = dot(reflect, view);
                 if(r_dot_v > 0.0) {
                     intensity += scene.lights[i]->intensity*pow(r_dot_v/(length(reflect)*length(view)), spec);

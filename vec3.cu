@@ -1,8 +1,5 @@
 #include <cuda.h>
-#include <stdio.h>
-
-typedef uchar4 Color;
-
+typedef uchar4 Color; // .x->R, .y->G, .z->B, .w->A
 __device__ double3 operator+ (double3 v1, double3 v2)
 {
     double3 retval;
