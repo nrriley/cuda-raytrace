@@ -428,6 +428,7 @@ __global__ void renderSingleFrame(Color *framebuffer, int width, int height, cur
 {
     Ray ray;
     ray.origin = origin;
+    ulong4 colorsum;
     Color color = BG_COLOR;
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
@@ -437,10 +438,13 @@ __global__ void renderSingleFrame(Color *framebuffer, int width, int height, cur
 
     ray.direction = CanvasToViewport(i, j, width, height);
     if(pathtrace) {
-        color = make_uchar4(0,0,0,0);
+        colorsum = make_ulong4(0,0,0,0);
         for(int n = 0; n < RAYS_PER_PIXEL; n++){
-            color = color + (1/n)*TracePath(ray, 0.001, DBL_MAX, BG_COLOR, RT_DEPTH, state);
+            color = TracePath(ray, 0.001, DBL_MAX, BG_COLOR, RT_DEPTH, state);
+            colorsum = make_ulong4(colorsum.x+color.x, colorsum.y+color.y, colorsum.z+color.z, 0);
         }
+        colorsum = make_ulong4(colorsum.x/RAYS_PER_PIXEL, colorsum.y/RAYS_PER_PIXEL, colorsum.z/RAYS_PER_PIXEL, 0);
+        color = make_uchar4(colorsum.x, colorsum.y, colorsum.z, 0);
 
     } else {
         color = TraceRay(ray, 0.001, DBL_MAX, BG_COLOR, RT_DEPTH);
